@@ -17,7 +17,7 @@ import java.security.Principal;
 
 @Slf4j
 @RestController
-@RequestMapping("/auth")
+@RequestMapping("v1/auth")
 public class AuthController {
 
     private final IUserService userService;
@@ -49,7 +49,7 @@ public class AuthController {
     @GetMapping("/authenticate")
     public ResponseEntity<?> authenticate(Principal principal){
         String name = principal.getName();
-        log.info("Authenticate User : "+ name);
+        log.info("Authenticate User : {}", name);
         return ResponseEntity.ok().build();
     }
 }
