@@ -6,25 +6,20 @@ import lombok.Getter;
 import java.io.Serializable;
 
 /**
- * Login / token-refresh response.
- * The password hash is never included.
+ * Safe user response DTO — never exposes the password hash.
  */
 @Getter
-public class JwtResponse implements Serializable {
+public class UserResponse implements Serializable {
 
     private final Long id;
     private final String name;
     private final String email;
     private final String username;
-    private final String accessToken;
-    private final String refreshToken;
 
-    public JwtResponse(Users user, String accessToken, String refreshToken) {
+    public UserResponse(Users user) {
         this.id = user.getId();
         this.name = user.getName();
         this.email = user.getEmail();
         this.username = user.getUsername();
-        this.accessToken = accessToken;
-        this.refreshToken = refreshToken;
     }
 }

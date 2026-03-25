@@ -2,13 +2,13 @@ package com.robot.cairo.security;
 
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.SignatureAlgorithm;
+import io.jsonwebtoken.io.Decoders;
+import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Component;
 
+import javax.crypto.SecretKey;
 import java.io.Serial;
 import java.io.Serializable;
 import java.util.Date;
@@ -17,7 +17,11 @@ import java.util.Map;
 import java.util.function.Function;
 
 /**
- * The type Jwt token util.
+ * Utility for generating and validating JWT access and refresh tokens.
+ *
+ * <p>Uses JJWT 0.12.x API with HS512 signing.
+ * The secret must be a Base64-encoded string representing at least 512 bits
+ * (generate with: {@code openssl rand -base64 64}).
  */
 @Component
 public class JwtTokenUtil implements Serializable {
@@ -25,107 +29,88 @@ public class JwtTokenUtil implements Serializable {
     @Serial
     private static final long serialVersionUID = -2550185165626007488L;
 
-    /**
-     * The constant JWT_TOKEN_VALIDITY.
-     */
-    public static final long JWT_TOKEN_VALIDITY = 365 * 24 * 60 * 60;
+    /** Claim key used to distinguish token type. */
+    private static final String CLAIM_TOKEN_TYPE = "type";
+    private static final String TOKEN_TYPE_ACCESS  = "access";
+    private static final String TOKEN_TYPE_REFRESH = "refresh";
 
     @Value("${jwt.secret}")
     private String secret;
 
-    /**
-     * Retrieve username from jwt token
-     *
-     * @param token the token
-     * @return the username from token
-     */
+    /** Access token validity in seconds (default 15 min). */
+    @Value("${jwt.expiration:900}")
+    private long accessTokenExpiration;
+
+    /** Refresh token validity in seconds (default 7 days). */
+    @Value("${jwt.refresh-expiration:604800}")
+    private long refreshTokenExpiration;
+
+    // ----------------------------------------------------------------
+    // Public API
+    // ----------------------------------------------------------------
+
     public String getUsernameFromToken(String token) {
         return getClaimFromToken(token, Claims::getSubject);
     }
 
-    /**
-     * Retrieve expiration date from jwt token
-     *
-     * @param token the token
-     * @return the expiration date from token
-     */
     public Date getExpirationDateFromToken(String token) {
         return getClaimFromToken(token, Claims::getExpiration);
     }
 
-    /**
-     * Gets claim from token.
-     *
-     * @param <T>            the type parameter
-     * @param token          the token
-     * @param claimsResolver the claims resolver
-     * @return the claim from token
-     */
     public <T> T getClaimFromToken(String token, Function<Claims, T> claimsResolver) {
-        final Claims claims = getAllClaimsFromToken(token);
-        return claimsResolver.apply(claims);
+        return claimsResolver.apply(getAllClaimsFromToken(token));
     }
 
-    /**
-     * For retrieveing any information from token we will need the secret key
-     *
-     * @param token the token
-     * @return the JWT Parser
-     */
-    private Claims getAllClaimsFromToken(String token) {
-        return Jwts.parser().setSigningKey(secret).parseClaimsJws(token).getBody();
-    }
-
-    /**
-     * For retrieveing any information from token we will need the secret key
-     *
-     * @param token the token
-     * @return the JWT Parser
-     */
-    private Boolean isTokenExpired(String token) {
-        final Date expiration = getExpirationDateFromToken(token);
-        return expiration.before(new Date());
-    }
-
-    /**
-     * Generate token for user
-     *
-     * @param userDetails the user details
-     * @return the string
-     */
-    public String generateToken(UserDetails userDetails) {
+    public String generateAccessToken(UserDetails userDetails) {
         Map<String, Object> claims = new HashMap<>();
-        return doGenerateToken(claims, userDetails.getUsername());
+        claims.put(CLAIM_TOKEN_TYPE, TOKEN_TYPE_ACCESS);
+        return buildToken(claims, userDetails.getUsername(), accessTokenExpiration);
     }
 
-    /**
-     * Generate token for user
-     * while creating the token -
-     * 1. Define  claims of the token, like Issuer, Expiration, Subject, and the ID
-     * 2. Sign the JWT using the HS512 algorithm and secret key.
-     * 3. According to JWS Compact Serialization(https://tools.ietf.org/html/draft-ietf-jose-json-web-signature-41#section-3.1)
-     * compaction of the JWT to a URL-safe string
-     *
-     * @param claims  the claims map
-     * @param subject subject of the token
-     * @return the string
-     */
-    private String doGenerateToken(Map<String, Object> claims, String subject) {
-        return Jwts.builder().setClaims(claims).setSubject(subject).setIssuedAt(new Date(System.currentTimeMillis()))
-                .setExpiration(new Date(System.currentTimeMillis() + JWT_TOKEN_VALIDITY * 1000))
-                .signWith(SignatureAlgorithm.HS512, secret).compact();
+    public String generateRefreshToken(UserDetails userDetails) {
+        Map<String, Object> claims = new HashMap<>();
+        claims.put(CLAIM_TOKEN_TYPE, TOKEN_TYPE_REFRESH);
+        return buildToken(claims, userDetails.getUsername(), refreshTokenExpiration);
     }
 
-    /**
-     * Validate token boolean.
-     *
-     * @param token       the token
-     * @param userDetails the user details
-     * @return the boolean
-     */
-    public Boolean validateToken(String token, UserDetails userDetails) {
+    public boolean validateToken(String token, UserDetails userDetails) {
         final String username = getUsernameFromToken(token);
         return username.equals(userDetails.getUsername()) && !isTokenExpired(token);
     }
 
+    public boolean isRefreshToken(String token) {
+        return TOKEN_TYPE_REFRESH.equals(getClaimFromToken(token, c -> c.get(CLAIM_TOKEN_TYPE, String.class)));
+    }
+
+    // ----------------------------------------------------------------
+    // Internal helpers
+    // ----------------------------------------------------------------
+
+    private Claims getAllClaimsFromToken(String token) {
+        return Jwts.parser()
+                .verifyWith(getSigningKey())
+                .build()
+                .parseSignedClaims(token)
+                .getPayload();
+    }
+
+    private boolean isTokenExpired(String token) {
+        return getExpirationDateFromToken(token).before(new Date());
+    }
+
+    private String buildToken(Map<String, Object> extraClaims, String subject, long expirationSeconds) {
+        long nowMillis = System.currentTimeMillis();
+        return Jwts.builder()
+                .claims(extraClaims)
+                .subject(subject)
+                .issuedAt(new Date(nowMillis))
+                .expiration(new Date(nowMillis + expirationSeconds * 1000L))
+                .signWith(getSigningKey())
+                .compact();
+    }
+
+    private SecretKey getSigningKey() {
+        byte[] keyBytes = Decoders.BASE64.decode(secret);
+        return Keys.hmacShaKeyFor(keyBytes);
+    }
 }

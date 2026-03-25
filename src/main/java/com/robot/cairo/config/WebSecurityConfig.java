@@ -1,5 +1,6 @@
 package com.robot.cairo.config;
 
+import com.robot.cairo.security.JwtAuthenticationEntryPoint;
 import com.robot.cairo.security.JwtRequestFilter;
 import com.robot.cairo.security.JwtUserDetailsService;
 import lombok.RequiredArgsConstructor;
@@ -20,7 +21,17 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import static org.springframework.security.config.http.SessionCreationPolicy.STATELESS;
 
 /**
- * The type Web security config.
+ * Spring Security configuration.
+ *
+ * <p>Key decisions:
+ * <ul>
+ *   <li>Session management is STATELESS — JWT carries all state.</li>
+ *   <li>CSRF is disabled because no browser session cookies are used.</li>
+ *   <li>The JWT filter runs before {@link UsernamePasswordAuthenticationFilter}.</li>
+ *   <li>Public paths: {@code /v1/auth/**} (login, register, token refresh).
+ *       NOTE: Spring Security matches against the path <em>after</em> the
+ *       context-path ({@code /api/sec}), so we use {@code /v1/auth/**} here.</li>
+ * </ul>
  */
 @Configuration
 @EnableWebSecurity
@@ -28,31 +39,43 @@ import static org.springframework.security.config.http.SessionCreationPolicy.STA
 @RequiredArgsConstructor
 public class WebSecurityConfig {
 
-    private final JwtRequestFilter jwtAuthenticationFilter;
-    private final JwtUserDetailsService userService;
+    private final JwtRequestFilter jwtRequestFilter;
+    private final JwtAuthenticationEntryPoint jwtAuthenticationEntryPoint;
+    private final JwtUserDetailsService userDetailsService;
     private final PasswordEncoder passwordEncoder;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
-        http.csrf(AbstractHttpConfigurer::disable)
-                .authorizeHttpRequests(request -> request.requestMatchers("/auth/**")
-                        .permitAll().anyRequest().authenticated())
-                .sessionManagement(manager -> manager.sessionCreationPolicy(STATELESS))
-                .authenticationProvider(authenticationProvider()).addFilterBefore(
-                        jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+        http
+            .csrf(AbstractHttpConfigurer::disable)
+            .exceptionHandling(ex -> ex
+                .authenticationEntryPoint(jwtAuthenticationEntryPoint)
+            )
+            .authorizeHttpRequests(auth -> auth
+                // Public — login, register, refresh
+                .requestMatchers("/v1/auth/**").permitAll()
+                // Everything else requires a valid JWT
+                .anyRequest().authenticated()
+            )
+            .sessionManagement(session -> session
+                .sessionCreationPolicy(STATELESS)
+            )
+            .authenticationProvider(authenticationProvider())
+            .addFilterBefore(jwtRequestFilter, UsernamePasswordAuthenticationFilter.class);
+
         return http.build();
-    }
-    @Bean
-    public AuthenticationProvider authenticationProvider() {
-        DaoAuthenticationProvider authProvider = new DaoAuthenticationProvider();
-        authProvider.setUserDetailsService(userService);
-        authProvider.setPasswordEncoder(passwordEncoder);
-        return authProvider;
     }
 
     @Bean
-    public AuthenticationManager authenticationManager(AuthenticationConfiguration config)
-            throws Exception {
+    public AuthenticationProvider authenticationProvider() {
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
+        provider.setUserDetailsService(userDetailsService);
+        provider.setPasswordEncoder(passwordEncoder);
+        return provider;
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
         return config.getAuthenticationManager();
     }
 }
